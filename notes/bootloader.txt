@@ -95,7 +95,7 @@ Modifying the bootloader:
 			mov		dh, 7
 			push 	cs
 			pop		es
-			mov		bp, offset msg1end		; offset in x86 means we're accessing the address of msg1end and not the value it contains, that is we're moving an address into bp (equivalent to leav bp, msg1end)
+			mov		bp, offset msg1end		; offset in x86 means we're accessing the address of msg1end and not the value it contains, that is we're moving an address into bp (equivalent to lea bp, msg1end)
 			mov 	ah, 13h
 			int 	10h
 			jmp 	msg1end					; don't try to execute the assignment 
@@ -116,3 +116,68 @@ Using bootloader to load a program:
 		A group of 18 sectors is a track which radiate outward and a side of a floppy disk consists of 80 tracks arranged in a disk
 		A floppy drive is needed to read a floppy disk, it has two heads, one for either side 
 		A floppy drive alternates sides as it writes data onto tracks 
+
+		Reading data: interrupt 13 / ah = 02 
+			al = number of sectors to be read
+			ch = track number 
+			cl = sector number
+			dh = head number
+			dl = drive number 
+			es:bx = pointer to buffer 
+
+		which returns:
+			ah = status 
+			al = number of sectors read 
+			cf = exit code (0 if successful, 1 if error)
+
+		updated bootloader.asm:
+
+; ************************************************************************************************
+org 	0x7c00
+bits 	16
+start: 	jmp boot
+
+boot: 
+	cli
+	cld
+
+	; can write IO instructions here 
+
+	; for calling the read interrupt
+	mov 	ax, 0x50
+
+	mov 	es, ax 	; set buffer to 0x50:0x0
+	xor 	bx, bx 
+
+	mov 	al, 2	; read 2 sectors 
+	mov 	ch, 0	; track 0
+	mov 	cl, 2	; read the second sector 
+	mov 	dh, 0	; read with head 0
+	mov 	dl, 0	; drive 0 
+
+	mov 	ah, 0x02	; interrupt code 
+	int 	0x13		; call interrupt 
+	jmp 	0x50:0x0 	; jump to OS location 
+
+	hlt
+
+times 510 - ($-$$) db 0
+dw 	0xAA55
+; ************************************************************************************************
+
+	For the purpose of demonstration, write an assembly program for the bootloader to run:
+
+	;***** sample.asm
+	mov 	eax, 1
+	add 	eax, 1
+	;*****
+
+	Compiled and written to disk the same way as our bootloader, but now to the second sector:
+
+		nasm -f bin sample.asm -o sample
+
+		dd if=sample of=disk.img bs=512 count=1 seek=1
+
+	If we run the qemu command now the bootloader should run sample.asm which means we've successfully loaded an OS (of sorts) using our bootloader which already successfully gets called by the emulated BIOS
+
+
