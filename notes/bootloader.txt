@@ -1,0 +1,118 @@
+Boot process:
+	1. BIOS transfers control to MBR bootloader in 0000:7c00h (hence bootloader org 0x7c00h)
+	2. setup machine environment 
+	3. load kernel:
+		a. read from disk
+		b. save it into main memory
+		c. jump to the starting address of the kernel to execute 
+
+Bare bones bootloader: 
+; ************************************************************************************************
+org 	0x7c00h		; the address BIOS is looking for a bootloader in 
+bits 	16			; specify 16 bit mode 
+start:	jmp boot 	; run the bootloader (not necessary here as boot is immediately under start)
+
+boot:
+	cli		; clear interrupt flag, no interrupts 
+	cld		; clear direction flag (DF in EFLAGS) "causes all subsequent string operations to increment the index registers ESI &| EDI"
+	hlt		; halt, all the bootloader does is shut down gracefully 
+
+tims 510 - ($-$$) 	db	0	; set all remaining bytes up to 510 to be 0 (so file is 512 long)
+dw 	0xAA55	; assign a word (two bytes) at the end of the file for the boot signature 
+; ************************************************************************************************
+
+Running the bootloader: 
+	1. nasm -f bin bootloader.asm -o bootloader 
+		(-f bin specifies the file format, -o indicates that the output file is called bootloader)
+	2. dd if=/dev/zero of=disk.img bs=512 count=2880 
+		(dev/zero "provides as many null characters as are read from it", which essentially means the input is 512 0s per block and 2880 blocks. dd is a command line utility for converting and copying files, bs sets the blocksize and count the number of blocks, which means the final floppy disk created is 1474560 bytes (1.5MB))
+	3. dd conv=notrunc if=bootloader of=disk.img bs=512 count=1 seek=0
+		(notrunc means that the disk.img isn't truncated to fit just one 512 byte block but rather retains its 1.5MB size. We take the object file created by the nasm command (1) and write it to our floppy disk in the first sector (as specified by seek=0))
+	4. qemu-system-i386 -machine q35 -fda disk.img -gdb tcp::26000 -S 
+		(qemu is an open source emulator, here it's emulating a q35 machine which has an i386 architecture, we have one input floppy disk(the disk.img we've created) and we're hooking up gdb (GNU debugger) over port 26000, -S tells qemu to hold off on booting until we've connected over tcp via gdb)
+		(this command will produce a warning saying that image format is not specified but that can safely be ignored in this case and if everything is typed out correctly then a qemu window should pop up)
+	* run gdb in a new terminal window to connect to qemu 
+	5. (gdb) set architecture i8086 
+		informs gdb of what architecture to expect, we're using i8086 because we're in 16 bit mode (as per the bootloader)
+	6. (gdb) target remote localhost:26000 
+		Connects as specified in the qemu call (4)
+	7. (gdb) b *0x7c00 
+		Set a break point at the address (the asterisk indicates that it's an address and not a symbol in the program itself)
+	8. (gdb) layout asm
+		allows us to view the assembly code
+	9. (gdb) layout reg
+		allows us to view the registers in real time 
+
+At this point the bootloader should be running successfully, although it doesn't do much (not that we should expect it to at this point)
+
+; ************************************************************************************************
+
+Modifying the bootloader:
+	We want the bootloader to do something itself before we start loading the OS, like printing a message for example. There are a number of interrupts we can call to have the bootloader print a message: 
+
+	int 10h / ah = 02h (set cursor position)
+		inputs:
+			dh = row 
+			dl = column 
+			bh = page number ; not sure what pages are, so I'm gonna stick to 0 
+
+		usage (set cursor position to 10,10):
+			mov		dh, 10
+			mov		dh, 10
+			mov 	bh, 0
+			mov 	ah, 2
+			int 	10h
+
+	int 10h / ah = 0Ah (write character only at cursor position)
+		inputs: 
+			al = character
+			bh = page number
+			cx = number of times to write character
+		usage:
+			mov		al, 66 ; decimal 66, should give 'B', haven't tested yet
+			mov		bh, 0
+			mov		cx, 1
+			mov		ah, 0ah
+			int 	10h
+
+	printing a string could be done by repeatedly calling 0ah and updating the cursor with 02h, but there is also an interrupt for writing strings:
+
+	int 10h / 13h (write string)
+		inputs:
+			al = write mode (two bits, bit 0 for updating cursor and bit 1 for strings with attributes, I'm gonna generally be using 1 so bit 1 is empty)
+			bh = page number 
+			bl = attribute if string contains only characters (not sure what this should be but example given is 0011_1011b)
+			cx = number of characters in string (length)
+			dl,dh = coordinate of start (column, row)
+			es:bp = address of string 
+
+		usage (example given in referred document):
+			mov		al, 1
+			mov		bh, 0
+			mov		bl, 0011_1011b
+			mov 	cx, msg1end - offset msg1
+			mov 	dl, 10
+			mov		dh, 7
+			push 	cs
+			pop		es
+			mov		bp, offset msg1end		; offset in x86 means we're accessing the address of msg1end and not the value it contains, that is we're moving an address into bp (equivalent to leav bp, msg1end)
+			mov 	ah, 13h
+			int 	10h
+			jmp 	msg1end					; don't try to execute the assignment 
+			msg1 	db " hello, world! "	; there's no separate sections for variable like .text 
+			msg1end:
+
+(My reference for the interrupts was: https://issuu.com/stellachristou/docs/i8086_and_dos_interrupts accessed on 30/06/20)
+
+; ************************************************************************************************
+
+Using bootloader to load a program:
+	A real bootloader must read and load an operating system
+	(I hadn't really looked into kernels earlier but I felt I should now. A kernel is the core of the operating system which basically controls everything, it facilitates communication between hardware and software. A kernel runs processes, manages hardware resources, handles interrupts and so on)
+
+	Floppy disks:
+		A floppy disk is a form of persistent storage 
+		The smallest unit of a floppy disk that can be read is called a sector, a group of 512 contiguous bytes (as we've seen in the floppy disk we created)
+		A group of 18 sectors is a track which radiate outward and a side of a floppy disk consists of 80 tracks arranged in a disk
+		A floppy drive is needed to read a floppy disk, it has two heads, one for either side 
+		A floppy drive alternates sides as it writes data onto tracks 
